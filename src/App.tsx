@@ -4,8 +4,7 @@ import { PDFDocument, PDFDict, PDFName, PDFArray, PDFRef, PDFString } from 'pdf-
 import { saveDirHandle, loadDirHandle, clearDirHandle } from './storage'
 
 const hasFSA = typeof window !== 'undefined' && 'showDirectoryPicker' in window;
-
-type Rect = { x: number; y: number; w: number; h: number };
+const TEMPLATE_PATH = '/AlternativeDownloadLinkPleaseRead.pdf'; // exact OG design
 
 export default function App() {
   const [dirHandle, setDirHandle] = useState<FileSystemDirectoryHandle | null>(null);
@@ -13,25 +12,21 @@ export default function App() {
   const [warn, setWarn] = useState<string>('');
   const [remember, setRemember] = useState<boolean>(true);
   const [overwriteInstant, setOverwriteInstant] = useState<boolean>(true);
-  const [rect, setRect] = useState<Rect | null>(null); // coords-based targeting
   const inputRef = useRef<HTMLInputElement>(null);
 
   const canonicalTarget = 'AlternativeDownloadLinkPleaseRead.pdf';
 
-  
-useEffect(() => {
-  // Auto-restore saved folder on mount (no permission prompts here)
-  (async () => {
-    if (!hasFSA) return;
-    const saved = await loadDirHandle();
-    if (saved) {
-      // Don't request permission here; defer to the next user action (drop/select)
-      setDirHandle(saved);
-      setStatus('Restored your save folder from last time. Permission will be requested when you save.');
-    }
-  })();
-}, []);
-
+  useEffect(() => {
+    // Restore saved folder handle without permission prompts
+    (async () => {
+      if (!hasFSA) return;
+      const saved = await loadDirHandle();
+      if (saved) {
+        setDirHandle(saved);
+        setStatus('Restored your save folder from last time. Permission will be requested when you save.');
+      }
+    })();
+  }, []);
 
   const chooseFolder = async () => {
     setWarn('');
@@ -45,13 +40,10 @@ useEffect(() => {
       setDirHandle(handle);
       setStatus('Folder selected.');
       if (remember) {
-        const ok = await saveDirHandle(handle);
-        if (!ok) setWarn('Could not remember folder (IndexedDB error).');
+        try { await saveDirHandle(handle); } catch { /* ignore */ }
       }
     } catch (e: any) {
-      if (e?.name !== 'AbortError') {
-        setWarn('Failed to open folder: ' + e?.message);
-      }
+      if (e?.name !== 'AbortError') setWarn('Failed to open folder: ' + e?.message);
     }
   };
 
@@ -79,69 +71,14 @@ useEffect(() => {
           await (dirHandle as any).removeEntry(name);
         }
       }
-    } catch {
-      // ignore
-    }
+    } catch {}
   };
 
-  const extractFirstUriAndAnnots = async (file: File) => {
+  // Extract first /URI from MD's Download.pdf
+  const extractFirstUri = async (file: File): Promise<string | null> => {
     const bytes = new Uint8Array(await file.arrayBuffer());
     const pdfDoc = await PDFDocument.load(bytes, { updateMetadata: false });
     const pages = pdfDoc.getPages();
-    let firstUrl: string | null = null;
-    const allAnnots: { pageIndex: number; ref: PDFRef; dict: PDFDict; rect: [number, number, number, number] }[] = [];
-    for (let p = 0; p < pages.length; p++) {
-      const page = pages[p];
-      const annotsRef = page.node.get(PDFName.of('Annots'));
-      if (!annotsRef) continue;
-      const annots = pdfDoc.context.lookup(annotsRef) as PDFArray;
-      if (!annots) continue;
-      for (let i = 0; i < annots.size(); i++) {
-        const annotRef = annots.get(i) as PDFRef;
-        const annot = pdfDoc.context.lookup(annotRef) as PDFDict;
-        if (!annot) continue;
-        const subType = annot.get(PDFName.of('Subtype'));
-        if (subType !== PDFName.of('Link')) continue;
-        const A = annot.get(PDFName.of('A'));
-        if (!A) continue;
-        const action = pdfDoc.context.lookup(A) as PDFDict;
-        if (!action) continue;
-        const S = action.get(PDFName.of('S'));
-        if (S !== PDFName.of('URI')) continue;
-        if (!firstUrl) {
-          const URI = action.get(PDFName.of('URI')) as any;
-          if (URI) {
-            try {
-              const str = (URI as any).decodeText ? (URI as any).decodeText() : String(URI);
-              if (typeof str === 'string' && str.trim().length > 0) firstUrl = str.trim();
-            } catch {}
-          }
-        }
-        const rect = annot.get(PDFName.of('Rect')) as PDFArray | undefined;
-        if (rect && rect.size && rect.size() === 4) {
-          const r = [rect.get(0) as any, rect.get(1) as any, rect.get(2) as any, rect.get(3) as any].map((n:any)=> Number(n?.number ?? n));
-          allAnnots.push({ pageIndex: p, ref: annotRef, dict: annot, rect: r as [number,number,number,number]});
-        }
-      }
-    }
-    return { firstUrl, allAnnots };
-  };
-
-  const intersects = (r: [number,number,number,number], area: Rect) => {
-    const [x1,y1,x2,y2] = r;
-    const ax1 = area.x, ay1 = area.y, ax2 = area.x + area.w, ay2 = area.y + area.h;
-    return !(x2 < ax1 || x1 > ax2 || y2 < ay1 || y1 > ay2);
-  };
-
-  const rewritePdfUris = async (file: File, newUrl: string, target: Rect | null): Promise<Uint8Array> => {
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    const pdfDoc = await PDFDocument.load(bytes, { updateMetadata: false });
-
-    const pages = pdfDoc.getPages();
-    let changed = 0;
-    let largestArea = 0;
-    let largestAnnot: { page: any; dict: PDFDict } | null = null;
-
     for (const page of pages) {
       const annotsRef = page.node.get(PDFName.of('Annots'));
       if (!annotsRef) continue;
@@ -159,101 +96,120 @@ useEffect(() => {
         if (!action) continue;
         const S = action.get(PDFName.of('S'));
         if (S !== PDFName.of('URI')) continue;
-
-        const rectArr = annot.get(PDFName.of('Rect')) as PDFArray | undefined;
-        let doChange = false;
-        if (target && rectArr && rectArr.size && rectArr.size() === 4) {
-          const r = [rectArr.get(0) as any, rectArr.get(1) as any, rectArr.get(2) as any, rectArr.get(3) as any].map((n:any)=> Number(n?.number ?? n));
-          if (intersects(r as [number,number,number,number], target)) doChange = true;
-        }
-
-        if (target) {
-          if (doChange) {
-            action.set(PDFName.of('URI'), PDFString.of(newUrl));
-            changed++;
-          }
-        } else {
-          // No coords -> choose largest link rect and change only that
-          if (rectArr && rectArr.size && rectArr.size() === 4) {
-            const r = [rectArr.get(0) as any, rectArr.get(1) as any, rectArr.get(2) as any, rectArr.get(3) as any].map((n:any)=> Number(n?.number ?? n));
-            const area = Math.abs((r[2]-r[0]) * (r[3]-r[1]));
-            if (area > largestArea) {
-              largestArea = area;
-              largestAnnot = { page, dict: action };
-            }
-          }
+        const URI = action.get(PDFName.of('URI')) as any;
+        if (URI) {
+          try {
+            const str = (URI as any).decodeText ? (URI as any).decodeText() : String(URI);
+            if (typeof str === 'string' && str.trim().length > 0) return str.trim();
+          } catch {}
         }
       }
     }
+    return null;
+  };
 
-    if (!target && largestAnnot) {
-      largestAnnot.dict.set(PDFName.of('URI'), PDFString.of(newUrl));
-      changed++;
+  // Load the exact OG PDF and replace its link annotation(s) with mdUrl
+  const injectUrlIntoTemplate = async (mdUrl: string): Promise<Uint8Array> => {
+    const res = await fetch(TEMPLATE_PATH);
+    if (!res.ok) throw new Error('Failed to load OG template PDF');
+    const tempBytes = new Uint8Array(await res.arrayBuffer());
+
+    const pdfDoc = await PDFDocument.load(tempBytes, { updateMetadata: false });
+    const pages = pdfDoc.getPages();
+    let changed = 0;
+
+    for (const page of pages) {
+      const annotsRef = page.node.get(PDFName.of('Annots'));
+      if (!annotsRef) continue;
+      const annots = pdfDoc.context.lookup(annotsRef) as PDFArray;
+      if (!annots) continue;
+
+      for (let i = 0; i < annots.size(); i++) {
+        const annotRef = annots.get(i) as PDFRef;
+        const annot = pdfDoc.context.lookup(annotRef) as PDFDict;
+        if (!annot) continue;
+        const subType = annot.get(PDFName.of('Subtype'));
+        if (subType !== PDFName.of('Link')) continue;
+        const A = annot.get(PDFName.of('A'));
+        if (!A) continue;
+        const action = pdfDoc.context.lookup(A) as PDFDict;
+        if (!action) continue;
+        const S = action.get(PDFName.of('S'));
+        if (S !== PDFName.of('URI')) continue;
+
+        // Replace URI
+        action.set(PDFName.of('URI'), PDFString.of(mdUrl));
+        changed++;
+      }
     }
 
     if (changed === 0) {
-      // Fallback: add a small invisible link at top-left on the first page
+      // In case the OG file lacked link annotations, we won't alter visuals.
+      // But we can add a small invisible link at the top-left to ensure at least one clickable area.
       const first = pages[0];
       const { height } = first.getSize();
-      const annotsExisting = first.node.get(PDFName.of('Annots'));
-      const arr = annotsExisting ? (pdfDoc.context.lookup(annotsExisting) as PDFArray) : pdfDoc.context.obj([]);
+      const arr = (first.node.get(PDFName.of('Annots')) as any) || pdfDoc.context.obj([]);
       const annot = pdfDoc.context.obj({
         Type: PDFName.of('Annot'),
         Subtype: PDFName.of('Link'),
         Rect: pdfDoc.context.obj([0, height - 20, 120, height]),
         Border: pdfDoc.context.obj([0, 0, 0]),
-        A: pdfDoc.context.obj({
-          S: PDFName.of('URI'),
-          URI: PDFString.of(newUrl),
-        }),
+        A: pdfDoc.context.obj({ S: PDFName.of('URI'), URI: PDFString.of(mdUrl) }),
       });
       const ref = pdfDoc.context.register(annot);
-      // @ts-ignore
-      if (arr.push) arr.push(ref);
+      if ((arr as any).push) (arr as any).push(ref);
       first.node.set(PDFName.of('Annots'), arr);
     }
 
     return await pdfDoc.save();
   };
 
-  const saveToDesktopFolder = async (data: Uint8Array) => {
-    if (!dirHandle) {
-      setWarn('Pick your Desktop (or any) folder first.');
+  const saveToFolder = async (data: Uint8Array) => {
+    if (!hasFSA) {
+      // Fallback browser save
+      const blob = new Blob([data], { type: 'application/pdf' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = canonicalTarget;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setStatus('Saved via browser download (check your default folder).');
       return;
     }
-    if (!(await ensurePermission(dirHandle))) {
+    if (!dirHandle) {
+      setWarn('Pick a subfolder (e.g., Desktop/MyPDFs) first.');
+      return;
+    }
+    // Ask for permission only during this user-initiated flow
+    // @ts-ignore
+    const ok = await ensurePermission(dirHandle);
+    if (!ok) {
       setWarn('No permission to write to that folder.');
       return;
     }
     try {
-      await cleanNumberedCopies();
+      // remove numbered dupes
+      try {
+        // @ts-ignore
+        for await (const [name] of (dirHandle as any).entries()) {
+          if (/^AlternativeDownloadLinkPleaseRead \(\d+\)\.pdf$/i.test(name)) {
+            // @ts-ignore
+            await (dirHandle as any).removeEntry(name);
+          }
+        }
+      } catch {}
       const fileHandle = await dirHandle.getFileHandle(canonicalTarget, { create: true });
-      // @ts-ignore
-      if (!(await ensurePermission(fileHandle))) {
-        setWarn('No permission to write the file.');
-        return;
-      }
       // @ts-ignore
       const writable = await fileHandle.createWritable({ keepExistingData: !overwriteInstant });
       await writable.write(data);
       await writable.close();
       setStatus(`Saved as ${canonicalTarget} ✅`);
     } catch (e: any) {
-      setWarn('Failed saving to chosen folder: ' + e?.message);
+      setWarn('Failed saving: ' + e?.message);
     }
-  };
-
-  const fallbackBrowserSave = async (data: Uint8Array) => {
-    const blob = new Blob([data], { type: 'application/pdf' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = canonicalTarget;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-    setStatus('Saved via browser download (check your default folder).');
   };
 
   const processFile = async (file: File) => {
@@ -269,21 +225,15 @@ useEffect(() => {
       return;
     }
     try {
-      const { firstUrl } = await extractFirstUriAndAnnots(file);
-      if (!firstUrl) {
-        setWarn('No link annotation found in the PDF. Make sure this is the original MyDesigns Download.pdf.');
+      const url = await extractFirstUri(file);
+      if (!url) {
+        setWarn('No link found in your Download.pdf');
         return;
       }
-      const edited = await rewritePdfUris(file, firstUrl, rect);
-      if (hasFSA && dirHandle) {
-        await saveToDesktopFolder(edited);
-      } else if (hasFSA && !dirHandle) {
-        setWarn('Choose your Desktop folder first.');
-      } else {
-        await fallbackBrowserSave(edited);
-      }
+      const edited = await injectUrlIntoTemplate(url); // keeps exact OG design
+      await saveToFolder(edited);
     } catch (err: any) {
-      setWarn('Failed to update PDF link: ' + (err?.message || String(err)));
+      setWarn('Failed to build OG AlternativeDownloadLinkPleaseRead.pdf: ' + (err?.message || String(err)));
     }
   };
 
@@ -305,22 +255,11 @@ useEffect(() => {
     e.preventDefault();
   };
 
-  const updateRect = (k: keyof Rect, v: string) => {
-    const num = Number(v);
-    if (Number.isNaN(num)) return;
-    setRect(prev => {
-      const base = prev ?? { x: 0, y: 0, w: 0, h: 0 };
-      return { ...base, [k]: num };
-    });
-  };
-
-  const clearRect = () => setRect(null);
-
   return (
     <div className="wrap">
       <div className="card">
-        <h1>Auto-extract MD link → <span className="mono">AlternativeDownloadLinkPleaseRead.pdf</span></h1>
-        <p>Drop/select your original MyDesigns <span className="mono">Download.pdf</span>. I’ll extract the embedded link automatically and update only the button area (by coords), or the largest link if no coords, then save to your chosen folder (tip: pick a subfolder like Desktop/MyPDFs).</p>
+        <h1>Use OG PDF ⟶ Inject MD Link ⟶ Save <span className="mono">AlternativeDownloadLinkPleaseRead.pdf</span></h1>
+        <p>Drop/select your original MyDesigns <span className="mono">Download.pdf</span>. I’ll extract the embedded link and inject it into your exact OG PDF (bundled), preserving the design 1:1, then save it to your chosen folder.</p>
 
         <div className="row" style={{ marginTop: 12, alignItems: 'center' }}>
           <button className="btn" onClick={chooseFolder} disabled={!hasFSA}>
@@ -339,41 +278,14 @@ useEffect(() => {
           </label>
         </div>
 
-        <div className="row" style={{ marginTop: 12 }}>
-          <div style={{display:'grid', gridTemplateColumns:'repeat(4, 1fr)', gap: 8, width:'100%'}}>
-            <div><label>X<br/><input type="number" value={rect?.x ?? ''} onChange={e=>updateRect('x', e.target.value)} style={{ width:'100%', padding:'8px', borderRadius:8, border:'1px solid #2a3443', background:'#0f172a', color:'#e5e7eb' }}/></label></div>
-            <div><label>Y<br/><input type="number" value={rect?.y ?? ''} onChange={e=>updateRect('y', e.target.value)} style={{ width:'100%', padding:'8px', borderRadius:8, border:'1px solid #2a3443', background:'#0f172a', color:'#e5e7eb' }}/></label></div>
-            <div><label>W<br/><input type="number" value={rect?.w ?? ''} onChange={e=>updateRect('w', e.target.value)} style={{ width:'100%', padding:'8px', borderRadius:8, border:'1px solid #2a3443', background:'#0f172a', color:'#e5e7eb' }}/></label></div>
-            <div><label>H<br/><input type="number" value={rect?.h ?? ''} onChange={e=>updateRect('h', e.target.value)} style={{ width:'100%', padding:'8px', borderRadius:8, border:'1px solid #2a3443', background:'#0f172a', color:'#e5e7eb' }}/></label></div>
-          </div>
-          <button className="btn secondary" onClick={clearRect}>Use Largest Link</button>
-        </div>
-
-        <div
-          onDrop={onDrop}
-          onDragOver={onDragOver}
-          style={{
-            marginTop: 16,
-            border: '2px dashed #2a3443',
-            borderRadius: 12,
-            padding: '40px',
-            textAlign: 'center',
-            color: '#9fb3c8',
-            background: '#0f172a88'
-          }}
-          title="Drag & drop your Download.pdf here"
-        >
+        <div onDrop={onDrop} onDragOver={onDragOver}
+          style={{ marginTop: 16, border: '2px dashed #2a3443', borderRadius: 12, padding: '40px', textAlign: 'center', color: '#9fb3c8', background: '#0f172a88' }}
+          title="Drag & drop your Download.pdf here">
           Drag & Drop your <span className="mono">Download.pdf</span> here
         </div>
 
         <div className="row" style={{ marginTop: 12 }}>
-          <input
-            ref={inputRef}
-            type="file"
-            accept="application/pdf"
-            onChange={onPickPDF}
-            title="Pick your MD Download.pdf"
-          />
+          <input ref={inputRef} type="file" accept="application/pdf" onChange={onPickPDF} title="Pick your MD Download.pdf" />
           <button className="btn secondary" onClick={() => inputRef.current?.click()}>
             Select PDF
           </button>
@@ -383,7 +295,7 @@ useEffect(() => {
         {warn && <div className="status warn">{warn}</div>}
 
         <p className="hint" style={{ marginTop: 18 }}>
-          Rules: Upload must be <span className="mono">Download.pdf</span>. Output is always <span className="mono">AlternativeDownloadLinkPleaseRead.pdf</span>. Numbered copies in the folder are removed automatically.
+          Output is always <span className="mono">AlternativeDownloadLinkPleaseRead.pdf</span>. Numbered copies in the folder are removed automatically.
         </p>
       </div>
     </div>
