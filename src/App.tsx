@@ -18,29 +18,20 @@ export default function App() {
 
   const canonicalTarget = 'AlternativeDownloadLinkPleaseRead.pdf';
 
-  useEffect(() => {
-    // Auto-restore saved folder on mount
-    (async () => {
-      if (!hasFSA) return;
-      const saved = await loadDirHandle();
-      if (saved) {
-        // @ts-ignore
-        const opts = { mode: 'readwrite' };
-        // @ts-ignore
-        const perm = await (saved as any).queryPermission(opts);
-        if (perm !== 'granted') {
-          // @ts-ignore
-          const req = await (saved as any).requestPermission(opts);
-          if (req !== 'granted') {
-            setWarn('Saved folder found but permission was not granted. Choose folder again.');
-            return;
-          }
-        }
-        setDirHandle(saved);
-        setStatus('Restored your save folder from last time ✅');
-      }
-    })();
-  }, []);
+  
+useEffect(() => {
+  // Auto-restore saved folder on mount (no permission prompts here)
+  (async () => {
+    if (!hasFSA) return;
+    const saved = await loadDirHandle();
+    if (saved) {
+      // Don't request permission here; defer to the next user action (drop/select)
+      setDirHandle(saved);
+      setStatus('Restored your save folder from last time. Permission will be requested when you save.');
+    }
+  })();
+}, []);
+
 
   const chooseFolder = async () => {
     setWarn('');
@@ -329,11 +320,11 @@ export default function App() {
     <div className="wrap">
       <div className="card">
         <h1>Auto-extract MD link → <span className="mono">AlternativeDownloadLinkPleaseRead.pdf</span></h1>
-        <p>Drop/select your original MyDesigns <span className="mono">Download.pdf</span>. I’ll extract the embedded link automatically and update only the button area (by coords), or the largest link if no coords, then save to your Desktop.</p>
+        <p>Drop/select your original MyDesigns <span className="mono">Download.pdf</span>. I’ll extract the embedded link automatically and update only the button area (by coords), or the largest link if no coords, then save to your chosen folder (tip: pick a subfolder like Desktop/MyPDFs).</p>
 
         <div className="row" style={{ marginTop: 12, alignItems: 'center' }}>
           <button className="btn" onClick={chooseFolder} disabled={!hasFSA}>
-            {dirHandle ? 'Change Save Folder' : 'Choose Save Folder (Desktop)'}
+            {dirHandle ? 'Change Save Folder' : 'Choose Save Folder (Desktop/MyPDFs)'}
           </button>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <input type="checkbox" checked={remember} onChange={(e)=> setRemember(e.target.checked)} />
