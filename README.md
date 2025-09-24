@@ -27,3 +27,15 @@ npm run dev
 - Folder persistence requires Chromium-based browsers and permission grants.
 - Coords are in PDF points (origin bottom-left). If unsure, leave blank to use the largest link.
 - If the input PDF has no link annotations, the app adds a small invisible link at the top-left of page 1.
+
+
+## Deploy to Netlify
+1. Push this repo to GitHub (branch: `main`).
+2. In Netlify: **Add new site → Import from Git** → choose this repo.
+3. Build settings:
+   - Build command: `npm run build`
+   - Publish directory: `dist`
+   - Node version: `20`
+4. Deploy. Netlify serves over HTTPS (required by the File System Access API).
+
+The included `netlify.toml` and `public/_redirects` handle SPA routing and headers.
