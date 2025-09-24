@@ -310,7 +310,7 @@ useEffect(() => {
 const processFiles = async (files: FileList | File[]) => {
   setWarn('');
   setStatus('');
-  const list = Array.from(files).filter(f => f.type === 'application/pdf' && /^download\.pdf$/i.test(f.name.trim()));
+  const list = Array.from(files).filter(f => f.type === 'application/pdf' && /^download(?:_\d+)?\.pdf$/i.test(f.name.trim()));
   if (list.length === 0) {
     setWarn('Drop/select one or more MyDesigns "Download.pdf" files.');
     return;
@@ -414,8 +414,8 @@ const resetTemplate = async () => {
       return;
     }
     const originalName = file.name.trim();
-    if (!/^download\.pdf$/i.test(originalName)) {
-      setWarn('Please upload the MyDesigns file named exactly "Download.pdf".');
+    if (!/^download(?:_\d+)?\.pdf$/i.test(originalName)) {
+      setWarn('Please upload your MyDesigns file named "Download.pdf" or "Download_<number>.pdf" (e.g., Download_1.pdf).');
       return;
     }
     try {
@@ -488,12 +488,12 @@ const onDrop = async (e: React.DragEvent<HTMLDivElement>) => {
 
         <div onDrop={onDrop} onDragOver={onDragOver}
           style={{ marginTop: 16, border: '2px dashed #2a3443', borderRadius: 12, padding: '40px', textAlign: 'center', color: '#9fb3c8', background: '#0f172a88' }}
-          title="Drag & drop your Download.pdf here">
-          Drag & Drop your <span className="mono">Download.pdf</span> here
+          title="Drag & drop your Download.pdf or Download_#.pdf here">
+          Drag & Drop your <span className="mono">Download.pdf</span> or <span className="mono">Download_#.pdf</span> here
         </div>
 
         <div className="row" style={{ marginTop: 12 }}>
-          <input ref={inputRef} type="file" accept="application/pdf" onChange={onPickPDF} title="Pick your MD Download.pdf" />
+          <input ref={inputRef} type="file" accept="application/pdf" onChange={onPickPDF} title="Pick your MD Download.pdf or Download_#.pdf" />
           <button className="btn secondary" onClick={() => inputRef.current?.click()}>
             Select PDF
           </button>
