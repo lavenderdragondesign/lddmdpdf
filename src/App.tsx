@@ -14,6 +14,67 @@ export default function App() {
   const [overwriteInstant, setOverwriteInstant] = useState<boolean>(true);
   const inputRef = useRef<HTMLInputElement>(null);
 
+const [templateBytes, setTemplateBytes] = useState<Uint8Array | null>(null);
+
+
+useEffect(() => {
+  (async () => {
+    try {
+      const res = await fetch(TEMPLATE_PATH);
+      if (res.ok) {
+        const ab = await res.arrayBuffer();
+        setTemplateBytes(new Uint8Array(ab));
+        setTemplateName('OG Template');
+      }
+    } catch {}
+  })();
+}, []);
+
+
+// Listen for messages from the browser extension and auto-save
+useEffect(() => {
+  function onMsg(e: MessageEvent) {
+    if (!e || !e.data || e.data.source !== 'lddmd-ext' || e.data.type !== 'MD_URL') return;
+    const url = String(e.data.url || '').trim();
+    if (!url) return;
+    (async () => {
+      try {
+        setLastUrl(url);
+        const edited = await injectUrlIntoTemplate(url, templateBytes);
+        if (hasFSA && dirHandle) {
+          await saveToFolder(edited);
+        } else if (hasFSA && !dirHandle) {
+          setWarn('Choose your save folder first.');
+        } else {
+          const blob = new Blob([edited], { type: 'application/pdf' });
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = 'AlternativeDownloadLinkPleaseRead.pdf';
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+        }
+      } catch (e: any) {
+        setWarn('Auto-save failed: ' + (e?.message || String(e)));
+      }
+    })();
+  }
+  window.addEventListener('message', onMsg);
+  return () => window.removeEventListener('message', onMsg);
+}, [templateBytes, dirHandle]);
+
+
+function deriveFolderNameFromUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    const parts = u.pathname.split('/').filter(Boolean);
+    const tail = parts.slice(-2).join('-') || parts.join('-') || 'md-link';
+    return `md-${tail}`.replace(/[^a-zA-Z0-9-_]/g, '-');
+  } catch {
+    return 'md-link';
+  }
+}
+
   const canonicalTarget = 'AlternativeDownloadLinkPleaseRead.pdf';
 
   useEffect(() => {
@@ -27,6 +88,39 @@ export default function App() {
       }
     })();
   }, []);
+
+
+// Listen for messages from the browser extension and auto-save
+useEffect(() => {
+  function onMsg(e: MessageEvent) {
+    if (!e || !e.data || e.data.source !== 'lddmd-ext' || e.data.type !== 'MD_URL') return;
+    const url = String(e.data.url || '').trim();
+    if (!url) return;
+    (async () => {
+      try {
+        setLastUrl(url);
+        const edited = await injectUrlIntoTemplate(url, templateBytes);
+        if (hasFSA && dirHandle) {
+          await saveToFolder(edited);
+        } else if (hasFSA && !dirHandle) {
+          setWarn('Choose your save folder first.');
+        } else {
+          const blob = new Blob([edited], { type: 'application/pdf' });
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = 'AlternativeDownloadLinkPleaseRead.pdf';
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+        }
+      } catch (e: any) {
+        setWarn('Auto-save failed: ' + (e?.message || String(e)));
+      }
+    })();
+  }
+  window.addEventListener('message', onMsg);
+  return () => window.removeEventListener('message', onMsg);
+}, [templateBytes, dirHandle]);
 
   const chooseFolder = async () => {
     setWarn('');
@@ -109,7 +203,7 @@ export default function App() {
   };
 
   // Load the exact OG PDF and replace its link annotation(s) with mdUrl
-  const injectUrlIntoTemplate = async (mdUrl: string): Promise<Uint8Array> => {
+  const injectUrlIntoTemplate = async (mdUrl: string, tplBytes?: Uint8Array | null): Promise<Uint8Array> => {
     const res = await fetch(TEMPLATE_PATH);
     if (!res.ok) throw new Error('Failed to load OG template PDF');
     const tempBytes = new Uint8Array(await res.arrayBuffer());
@@ -212,6 +306,106 @@ export default function App() {
     }
   };
 
+  
+const processFiles = async (files: FileList | File[]) => {
+  setWarn('');
+  setStatus('');
+  const list = Array.from(files).filter(f => f.type === 'application/pdf' && /^download\.pdf$/i.test(f.name.trim()));
+  if (list.length === 0) {
+    setWarn('Drop/select one or more MyDesigns "Download.pdf" files.');
+    return;
+  }
+  if (!hasFSA) {
+    // Fallback: build and trigger browser downloads one by one
+    for (const file of list) {
+      const url = await extractFirstUri(file);
+      if (!url) continue;
+      const out = await injectUrlIntoTemplate(url, templateBytes);
+      const blob = new Blob([out], { type: 'application/pdf' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'AlternativeDownloadLinkPleaseRead.pdf';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+    setStatus(`Saved ${list.length} file(s) via browser download.`);
+    return;
+  }
+  if (!dirHandle) {
+    setWarn('Pick a save folder (e.g., Desktop/MyPDFs) first.');
+    return;
+  }
+  // @ts-ignore
+  const ok = await ensurePermission(dirHandle);
+  if (!ok) {
+    setWarn('No permission to write to that folder.');
+    return;
+  }
+
+  let success = 0, skipped = 0;
+  for (const file of list) {
+    try {
+      const url = await extractFirstUri(file);
+      if (!url) { skipped++; continue; }
+      const out = await injectUrlIntoTemplate(url, templateBytes);
+      const subName = deriveFolderNameFromUrl(url);
+      // Create per-file subfolder so we can keep the canonical filename without numbers
+      // @ts-ignore
+      const subDir = await dirHandle.getDirectoryHandle(subName, { create: true });
+      // Clean numbered dupes inside subfolder (very rare)
+      try {
+        // @ts-ignore
+        for await (const [name] of (subDir as any).entries()) {
+          if (/^AlternativeDownloadLinkPleaseRead \(\d+\)\.pdf$/i.test(name)) {
+            // @ts-ignore
+            await (subDir as any).removeEntry(name);
+          }
+        }
+      } catch {}
+
+      const fileHandle = await subDir.getFileHandle('AlternativeDownloadLinkPleaseRead.pdf', { create: true });
+      // @ts-ignore
+      const writable = await fileHandle.createWritable({ keepExistingData: false });
+      await writable.write(out);
+      await writable.close();
+      success++;
+    } catch {
+      skipped++;
+    }
+  }
+  setStatus(`Batch complete: ${success} saved, ${skipped} skipped.`);
+};
+
+  
+const onPickTemplate = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  if (file.type !== 'application/pdf') {
+    setWarn('Template must be a PDF.');
+    e.target.value = '';
+    return;
+  }
+  const ab = await file.arrayBuffer();
+  setTemplateBytes(new Uint8Array(ab));
+  setTemplateName(file.name);
+  setStatus('Custom template loaded.');
+  e.target.value = '';
+};
+
+const resetTemplate = async () => {
+  try {
+    const res = await fetch(TEMPLATE_PATH);
+    if (!res.ok) throw new Error('Failed to load OG template PDF');
+    const ab = await res.arrayBuffer();
+    setTemplateBytes(new Uint8Array(ab));
+    setTemplateName('OG Template');
+    setStatus('Reverted to OG template.');
+  } catch (e: any) {
+    setWarn('Could not load OG template: ' + (e?.message || String(e)));
+  }
+};
+
   const processFile = async (file: File) => {
     setWarn('');
     setStatus('');
@@ -237,19 +431,33 @@ export default function App() {
     }
   };
 
-  const onPickPDF = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    await processFile(file);
-    e.target.value = '';
-  };
+  
 
-  const onDrop = async (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    const file = e.dataTransfer.files?.[0];
-    if (!file) return;
-    await processFile(file);
-  };
+const onPickPDF = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const files = e.target.files;
+  if (!files || files.length === 0) return;
+  if (files.length > 1) {
+    setWarn(`Multiple files detected; processing the first one only to keep the output name clean.`);
+  }
+  const file = files[0];
+  await processFile(file);
+  e.target.value = '';
+};
+
+
+
+  
+
+
+const onDrop = async (e: React.DragEvent<HTMLDivElement>) => {
+  e.preventDefault();
+  const file = e.dataTransfer.files?.[0];
+  if (!file) return;
+  await processFile(file);
+};
+
+
+
 
   const onDragOver = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
